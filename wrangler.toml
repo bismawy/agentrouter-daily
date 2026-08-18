@@ -1,0 +1,7 @@
+name = "agentrouter-autoclaim"
+main = "src/index.ts"
+compatibility_date = "2024-04-01"
+
+# Run daily at 01:00 UTC (08:00 WIB)
+[triggers]
+crons = ["0 1 * * *"]
