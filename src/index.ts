@@ -1,8 +1,21 @@
-import { Env } from "./types";
-import { executeDailyClaim } from "./agentrouter";
+import { Env, ClaimResult } from "./types";
+import { executeDailyClaim, getCurrentUserInfo, diagnose } from "./agentrouter";
+import { browserClaim, diagnoseBrowser } from "./browser-claim";
 import { notify } from "./notifier";
-import { getClaimHistory, addClaimHistory, setClaimHistory, isClaimedToday } from "./history";
+import { getClaimHistory, addClaimHistory, setClaimHistory, clearClaimHistory } from "./history";
 import { renderDashboard } from "./dashboard";
+
+/**
+ * Jalankan klaim: Browser Run (lolos WAF) jika tersedia, fallback ke Pure HTTP OAuth.
+ */
+async function runClaim(env: Env): Promise<ClaimResult> {
+  if (env.BROWSER) {
+    const res = await browserClaim(env);
+    if (res.success) return res;
+    console.log("[CLAIM] Browser Run gagal, fallback ke Pure HTTP:", res.message);
+  }
+  return executeDailyClaim(env);
+}
 
 export default {
   /**
@@ -10,7 +23,7 @@ export default {
    */
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log("[CRON] Memulai eksekusi auto-claim AgentRouter harian...");
-    const result = await executeDailyClaim(env);
+    const result = await runClaim(env);
     console.log(`[CRON] Hasil: ${result.success ? "SUCCESS" : "FAILED"} - ${result.message}`);
 
     // Simpan ke riwayat logs (otomatis menggantikan entri hari yang sama jika sudah ada)
@@ -44,6 +57,24 @@ export default {
       );
     }
 
+    // Endpoint diagnosa koneksi (tanpa membocorkan secret)
+    if (path === "/debug" || path === "/diagnose") {
+      const report = await diagnose(env);
+      return new Response(JSON.stringify(report, null, 2), {
+        status: 200,
+        headers: jsonHeaders,
+      });
+    }
+
+    // Endpoint diagnosa alur browser (menghabiskan kuota Browser Run, gunakan hemat)
+    if (path === "/debug-browser") {
+      const report = await diagnoseBrowser(env);
+      return new Response(JSON.stringify(report, null, 2), {
+        status: 200,
+        headers: jsonHeaders,
+      });
+    }
+
     // API History
     if (path === "/api/history") {
       const logs = await getClaimHistory();
@@ -53,15 +84,53 @@ export default {
       });
     }
 
-    // Endpoint reset/clean riwayat (misal /clean-history)
+    // Endpoint reset/clean riwayat (misal /clean-history atau /reset)
     if (path === "/clean-history" || path === "/reset") {
-      const logs = await getClaimHistory();
-      const cleaned = logs.slice(0, 1);
-      await setClaimHistory(cleaned);
-      return new Response(JSON.stringify({ success: true, logs: cleaned }, null, 2), {
-        status: 200,
-        headers: jsonHeaders,
-      });
+      await clearClaimHistory();
+
+      let claimEntry: ClaimResult | null = null;
+      if (env.GITHUB_COOKIE?.trim()) {
+        claimEntry = await runClaim(env);
+      }
+
+      if (!claimEntry || !claimEntry.success) {
+        const currentUser = await getCurrentUserInfo(env);
+        if (currentUser) {
+          claimEntry = {
+            success: true,
+            message: `Riwayat dibersihkan. Saldo aktif tersinkronisasi: ${currentUser.displayName} (${currentUser.githubId}).`,
+            balance: currentUser.balance,
+            statusCode: 200,
+            details: {
+              id: currentUser.id,
+              username: currentUser.username,
+              displayName: currentUser.displayName,
+              githubId: currentUser.githubId,
+              quota: currentUser.quota,
+              usedQuota: currentUser.usedQuota,
+            },
+            timestamp: new Date().toISOString(),
+          };
+        }
+      }
+
+      if (claimEntry && claimEntry.balance) {
+        await setClaimHistory([claimEntry]);
+      }
+
+      return new Response(
+        JSON.stringify(
+          {
+            success: true,
+            message: "Riwayat log berhasil dibersihkan dan disinkronkan dengan saldo terkini.",
+            balance: claimEntry?.balance || "$0.00 USD",
+            logs: claimEntry ? [claimEntry] : [],
+          },
+          null,
+          2
+        ),
+        { status: 200, headers: jsonHeaders }
+      );
     }
 
     // Trigger Claim Endpoint (/trigger atau /claim)
@@ -79,11 +148,7 @@ export default {
         }
       }
 
-      const logs = await getClaimHistory();
-      const alreadyClaimed = isClaimedToday(logs);
-
-      const result = await executeDailyClaim(env);
-      result.alreadyClaimed = alreadyClaimed;
+      const result = await runClaim(env);
 
       // Update riwayat tanpa spamming entri ganda per hari
       await addClaimHistory(result);
@@ -102,12 +167,23 @@ export default {
 
     // Default: Web Dashboard (Tabel Status & Riwayat Monochrome)
     const logs = await getClaimHistory();
-    // Sinkronisasi cache agar hanya tersimpan 1 log per tanggal
+    let liveUser = undefined;
+    const current = await getCurrentUserInfo(env);
+    if (current) {
+      liveUser = {
+        balance: current.balance,
+        displayName: current.displayName,
+        githubId: current.githubId,
+        username: current.username,
+        lastLoginTime: current.lastLoginTime,
+      };
+    }
+
     if (logs.length > 0) {
       await setClaimHistory(logs);
     }
 
-    const html = renderDashboard(logs);
+    const html = renderDashboard(logs, liveUser);
 
     return new Response(html, {
       status: 200,

@@ -1,6 +1,12 @@
-name = "agentrouter-autoclaim"
+name = "agentrouter-daily"
 main = "src/index.ts"
-compatibility_date = "2024-04-01"
+compatibility_date = "2026-08-19"
+compatibility_flags = ["nodejs_compat"]
+upload_source_maps = true
+
+# Browser Run (Browser Rendering) — untuk login ulang OAuth yang lolos WAF Aliyun
+[browser]
+binding = "BROWSER"
 
 # Run daily at 01:00 UTC (08:00 WIB)
 [triggers]

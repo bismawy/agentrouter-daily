@@ -1,5 +1,6 @@
 export interface Env {
-  AGENTROUTER_COOKIE: string;
+  AGENTROUTER_COOKIE?: string;
+  GITHUB_COOKIE?: string;
   AGENTROUTER_USER_ID?: string;
   NEW_API_USER?: string;
   TELEGRAM_BOT_TOKEN?: string;
@@ -7,6 +8,8 @@ export interface Env {
   DISCORD_WEBHOOK_URL?: string;
   TRIGGER_AUTH_KEY?: string;
   AGENTROUTER_BASE_URL?: string;
+  // Browser Run binding (dari wrangler.toml [browser]); undefined jika tidak dikonfigurasi
+  BROWSER?: any;
 }
 
 export interface ClaimResult {
