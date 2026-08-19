@@ -22,9 +22,17 @@ Sistem otomatis untuk login dan klaim reward $25 harian di [agentrouter.org](htt
 ### A. Ambil Cookie GitHub (Wajib untuk Auto Re-login & Klaim $25)
 > **Penting:** Salin **SEMUA cookie** github.com (bukan hanya `user_session`). GitHub mewajibkan cookie `_gh_sess` untuk validasi form persetujuan OAuth (tanpa itu, klik "Authorize" gagal dengan halaman error "Oh no").
 
+#### Cara Cepat (Disarankan) — via Network Tab
 1. Buka browser yang sudah login akun GitHub Anda di `https://github.com`.
-2. Buka **Developer Tools** (`F12`) > tab **Application** (atau **Storage**) > **Cookies** > pilih `https://github.com`.
-3. Salin seluruh cookie menjadi satu string dengan format `nama=nilai; nama=nilai; ...` — minimal sertakan `user_session` dan `_gh_sess`.
+2. Buka **Developer Tools** (`F12`) > tab **Network**.
+3. Klik filter **`Doc`** di baris jenis resource (All / Fetch/XHR / **Doc** / ...) — hanya request halaman (`document`) yang tampil.
+4. Cari request bernama **`agentrouter-daily`** (Type: `document`).
+5. Klik request tersebut > panel kanan > **Headers** > **Request Headers** > salin **seluruh nilai** baris **`cookie:`** — satu string siap pakai, berisi semua cookie termasuk `_gh_sess` (HttpOnly).
+
+#### Cara Alternatif — via Application Tab
+1. Buka **Developer Tools** (`F12`) > tab **Application** (atau **Storage**) > **Cookies** > pilih `https://github.com`.
+2. Klik baris cookie pertama > `Ctrl + A` (pilih semua) > `Ctrl + C` (salin) > paste di Notepad.
+3. Ambil kolom **Name** dan **Value** saja, gabung jadi satu string dengan format `nama=nilai; nama=nilai; ...` — minimal sertakan `user_session` dan `_gh_sess`.
 
 Contoh:
 ```
