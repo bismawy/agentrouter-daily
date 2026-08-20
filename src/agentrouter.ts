@@ -55,15 +55,19 @@ export function formatGithubCookie(rawCookie: string): string {
  */
 export function parseGithubCookies(rawCookie: string): { name: string; value: string; domain: string; path: string }[] {
   return formatGithubCookie(rawCookie)
+    // Bersihkan karakter kontrol (newline/wrapping dari copy DevTools) & pecah per pasangan
+    .replace(/[\r\n\t]+/g, " ")
     .split(";")
     .map((s) => s.trim())
     .filter(Boolean)
     .map((pair) => {
       const idx = pair.indexOf("=");
-      const name = idx > 0 ? pair.slice(0, idx).trim() : pair.trim();
-      const value = idx > 0 ? pair.slice(idx + 1).trim() : "";
+      const name = (idx > 0 ? pair.slice(0, idx) : pair).trim();
+      const value = (idx > 0 ? pair.slice(idx + 1) : "").trim();
       return { name, value, domain: ".github.com", path: "/" };
-    });
+    })
+    // Buang pasangan yang tidak valid (nama kosong / mengandung karakter ilegal / value mengandung spasi di tengah karena salah wrap)
+    .filter((c) => c.name && !/[\s={}?&]/.test(c.name) && !/[\n\r\t]/.test(c.value));
 }
 
 /**

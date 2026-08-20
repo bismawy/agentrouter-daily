@@ -32,6 +32,28 @@ async function fetchOAuthState(baseUrl: string): Promise<string | null> {
 }
 
 /**
+ * Inject cookie GitHub ke browser context dengan toleransi: coba semua sekaligus,
+ * jika ditolak coba satu-per-satu dan lewati yang invalid (kembalikan nama-namanya).
+ * Nilai cookie tidak pernah dibocorkan.
+ */
+async function addGithubCookies(context: any, githubCookie: string): Promise<string[]> {
+  const cookies = parseGithubCookies(githubCookie);
+  const failed: string[] = [];
+  try {
+    await context.addCookies(cookies);
+  } catch {
+    for (const c of cookies) {
+      try {
+        await context.addCookies([c]);
+      } catch {
+        failed.push(c.name);
+      }
+    }
+  }
+  return failed;
+}
+
+/**
  * Klaim $25 harian via Browser Run (browser sungguhan → lolos WAF Aliyun).
  * Alur: state → GitHub authorize (dengan sesi GitHub) → callback AgentRouter → baca saldo.
  */
@@ -77,7 +99,8 @@ export async function browserClaim(env: Env): Promise<ClaimResult> {
       const browser = await launch(browserBinding);
       try {
         const context = await browser.newContext({ userAgent: USER_AGENT });
-        await context.addCookies(parseGithubCookies(githubCookie));
+        const failedCookies = await addGithubCookies(context, githubCookie);
+        if (failedCookies.length) console.log("[BROWSER] cookie ditolak & dilewati:", failedCookies.join(", "));
         const page = await context.newPage();
 
         // 3. Navigasi ke GitHub authorize (browser mengikuti redirect OAuth)
@@ -171,7 +194,8 @@ export async function diagnoseBrowser(env: Env): Promise<Record<string, unknown>
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({ userAgent: USER_AGENT });
-    await context.addCookies(parseGithubCookies(env.GITHUB_COOKIE));
+    const invalidCookies = await addGithubCookies(context, env.GITHUB_COOKIE);
+    report.invalidCookies = invalidCookies;
     const page = await context.newPage();
 
     const authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
