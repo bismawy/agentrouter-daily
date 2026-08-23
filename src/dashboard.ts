@@ -346,7 +346,7 @@ export function renderDashboard(
     <header class="header">
       <div>
         <h1 class="title">AgentRouter Auto-Claim</h1>
-        <p class="subtitle">Jadwal: Harian 08:00 WIB (01:00 UTC)</p>
+        <p class="subtitle">Jadwal: Harian 08:00 WIB (+ retry 14:00 WIB)</p>
       </div>
       <div>
         <button id="claimBtn" class="btn" onclick="triggerClaim()" ${hasClaimedToday ? "disabled" : ""}>
@@ -410,7 +410,7 @@ export function renderDashboard(
       const tbody = document.getElementById('tableBody');
       const pagination = document.getElementById('pagination');
       if (!LOGS.length) {
-        tbody.innerHTML = '<tr><td colspan="3" class="empty">Belum ada riwayat tercatat.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">Belum ada riwayat tercatat.</td></tr>';
         pagination.style.display = 'none';
         return;
       }
@@ -429,7 +429,13 @@ export function renderDashboard(
           '<td class="col-date">' + dateStr + ' WIB</td>' +
           '<td class="col-status">' + tag + '</td>' +
           '<td class="col-balance">' + (log.balance || '-') + '</td>' +
-          '<td class="col-reward">' + (log.success ? '<span class="reward-ok">+$25.00</span>' : '<span class="reward-none">-</span>') + '</td>' +
+          '<td class="col-reward">' + (
+            log.verified
+              ? '<span class="reward-ok">+$25.00</span>'
+              : log.success
+                ? '<span class="reward-ok" title="Login hari ini aktif; kenaikan saldo tidak terukur langsung">+$25.00&#42;</span>'
+                : '<span class="reward-none">-</span>'
+          ) + '</td>' +
           '</tr>';
       }).join('');
 
@@ -453,11 +459,17 @@ export function renderDashboard(
       btn.innerText = "Memproses...";
 
       try {
-        const res = await fetch('/trigger?notify=false', {
+        // Teruskan ?key=... dari URL dashboard ke /trigger (bila TRIGGER_AUTH_KEY disetel)
+        const target = new URL('/trigger', window.location.href);
+        target.searchParams.set('notify', 'false');
+        const key = new URLSearchParams(window.location.search).get('key');
+        if (key) target.searchParams.set('key', key);
+
+        const res = await fetch(target.toString(), {
           headers: { 'Accept': 'application/json' }
         });
         const data = await res.json();
-        
+
         setTimeout(() => {
           window.location.reload();
         }, 500);

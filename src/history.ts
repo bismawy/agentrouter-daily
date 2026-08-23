@@ -1,6 +1,5 @@
-import { ClaimResult } from "./types";
-
-const CACHE_URL = "https://agentrouter-daily.internal/logs.json";
+import { Env, ClaimResult } from "./types";
+import { getStateStore, STORAGE_KEYS } from "./state";
 
 function getDateKey(isoTimestamp: string): string {
   return new Date(isoTimestamp).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
@@ -21,7 +20,7 @@ export function deduplicateByDate(logs: ClaimResult[]): ClaimResult[] {
 
 export function isClaimedToday(logs: ClaimResult[], lastLoginTimestamp?: number | string): boolean {
   const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
-  
+
   // 1. Cek dari log riwayat yang berstatus sukses
   const fromLogs = logs.some((l) => l.success && getDateKey(l.timestamp) === todayKey);
   if (fromLogs) return true;
@@ -34,9 +33,7 @@ export function isClaimedToday(logs: ClaimResult[], lastLoginTimestamp?: number 
 
   if (rawLoginTime) {
     const loginTsMs =
-      typeof rawLoginTime === "number" && rawLoginTime < 1e12
-        ? rawLoginTime * 1000
-        : Number(rawLoginTime);
+      typeof rawLoginTime === "number" && rawLoginTime < 1e12 ? rawLoginTime * 1000 : Number(rawLoginTime);
     if (!isNaN(loginTsMs) && loginTsMs > 0) {
       const loginDateKey = new Date(loginTsMs).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
       if (loginDateKey === todayKey) {
@@ -48,71 +45,42 @@ export function isClaimedToday(logs: ClaimResult[], lastLoginTimestamp?: number 
   return false;
 }
 
-export async function getClaimHistory(): Promise<ClaimResult[]> {
+/**
+ * Riwayat klaim disimpan di Durable Object (strongly consistent, tidak bisa
+ * ter-evict sembarangan) — menggantikan Cache API yang per-colo & best-effort.
+ */
+export async function getClaimHistory(env: Env): Promise<ClaimResult[]> {
   try {
-    const cache = (caches as any).default;
-    if (!cache) return [];
-    const match = await cache.match(CACHE_URL);
-    if (match) {
-      const logs = (await match.json().catch(() => [])) as ClaimResult[];
-      if (Array.isArray(logs)) {
-        return deduplicateByDate(logs);
-      }
-    }
+    const store = getStateStore(env);
+    const logs = await store.getJson(STORAGE_KEYS.history);
+    return Array.isArray(logs) ? deduplicateByDate(logs as ClaimResult[]) : [];
   } catch (err) {
-    console.error("Cache get error:", err);
+    console.error("History get error:", err);
+    return [];
   }
-  return [];
 }
 
-export async function addClaimHistory(result: ClaimResult): Promise<void> {
+export async function addClaimHistory(env: Env, result: ClaimResult): Promise<void> {
   try {
-    const cache = (caches as any).default;
-    if (!cache) return;
-    const currentLogs = await getClaimHistory();
-
-    const resultDateKey = getDateKey(result.timestamp);
+    const store = getStateStore(env);
+    const currentLogs = await getClaimHistory(env);
 
     // Hapus log lama pada tanggal yang sama, sisakan hasil terbaru saja
+    const resultDateKey = getDateKey(result.timestamp);
     const filteredLogs = currentLogs.filter((l) => getDateKey(l.timestamp) !== resultDateKey);
     const updatedLogs = deduplicateByDate([result, ...filteredLogs]).slice(0, 30);
 
-    const response = new Response(JSON.stringify(updatedLogs), {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "public, max-age=2592000",
-      },
-    });
-
-    await cache.put(CACHE_URL, response);
+    await store.putJson(STORAGE_KEYS.history, updatedLogs);
   } catch (err) {
-    console.error("Cache put error:", err);
+    console.error("History put error:", err);
   }
 }
 
-export async function clearClaimHistory(): Promise<void> {
+export async function clearClaimHistory(env: Env): Promise<void> {
   try {
-    const cache = (caches as any).default;
-    if (!cache) return;
-    await cache.delete(CACHE_URL);
+    const store = getStateStore(env);
+    await store.deleteJson(STORAGE_KEYS.history);
   } catch (err) {
-    console.error("Cache clear error:", err);
-  }
-}
-
-export async function setClaimHistory(logs: ClaimResult[]): Promise<void> {
-  try {
-    const cache = (caches as any).default;
-    if (!cache) return;
-    const uniqueLogs = deduplicateByDate(logs).slice(0, 30);
-    const response = new Response(JSON.stringify(uniqueLogs), {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "public, max-age=2592000",
-      },
-    });
-    await cache.put(CACHE_URL, response);
-  } catch (err) {
-    console.error("Cache set error:", err);
+    console.error("History clear error:", err);
   }
 }

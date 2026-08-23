@@ -8,6 +8,18 @@ upload_source_maps = true
 [browser]
 binding = "BROWSER"
 
-# Run daily at 01:00 UTC (08:00 WIB)
+# Durable Object — penyimpanan sesi AgentRouter, snapshot user, riwayat klaim & lock.
+# SQLite-backed (new_sqlite_classes) agar bisa dipakai di Workers Free Plan;
+# dibuat otomatis saat deploy, tidak perlu pembuatan manual.
+[durable_objects]
+bindings = [{ name = "STATE", class_name = "StateStore" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StateStore"]
+
+# Klaim harian 08:00 WIB + retry 14:00 WIB.
+# Tiap eksekusi cek dulu (tanpa browser) apakah reward hari ini sudah aktif → skip murah.
+# Catatan: Workers Free membatasi 5 cron trigger per akun — jadwal ini 2 slot.
 [triggers]
-crons = ["0 1 * * *"]
+crons = ["0 1 * * *", "0 7 * * *"]
