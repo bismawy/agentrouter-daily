@@ -458,21 +458,39 @@ export function renderDashboard(
       btn.disabled = true;
       btn.innerText = "Memproses...";
 
-      try {
+      function run(k) {
         // Teruskan ?key=... dari URL dashboard ke /trigger (bila TRIGGER_AUTH_KEY disetel)
         const target = new URL('/trigger', window.location.href);
         target.searchParams.set('notify', 'false');
-        const key = new URLSearchParams(window.location.search).get('key');
-        if (key) target.searchParams.set('key', key);
+        if (k) target.searchParams.set('key', k);
+        return fetch(target.toString(), { headers: { 'Accept': 'application/json' } });
+      }
 
-        const res = await fetch(target.toString(), {
-          headers: { 'Accept': 'application/json' }
-        });
-        const data = await res.json();
+      try {
+        let key = new URLSearchParams(window.location.search).get('key');
+        let res = await run(key);
 
-        setTimeout(() => {
-          window.location.reload();
-        }, 500);
+        // Endpoint terkunci tapi key tidak ada di URL -> minta key sekali, lalu coba lagi
+        if (res.status === 401 && !key) {
+          key = prompt("Endpoint /trigger terkunci (TRIGGER_AUTH_KEY). Masukkan key:");
+          if (!key) {
+            btn.disabled = false;
+            btn.innerText = "Klaim Sekarang";
+            return;
+          }
+          res = await run(key);
+        }
+
+        let data = null;
+        try { data = await res.json(); } catch (e) {}
+
+        const msg = data && data.message ? data.message : ("HTTP " + res.status);
+        if (res.ok && data && data.success) {
+          alert("Klaim berhasil: " + msg);
+        } else {
+          alert("Klaim gagal (HTTP " + res.status + "): " + msg);
+        }
+        window.location.reload();
       } catch (err) {
         alert("Gagal: " + err.message);
         btn.disabled = false;

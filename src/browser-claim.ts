@@ -1,62 +1,14 @@
 import { launch } from "@cloudflare/playwright";
 import { Env, StoredSession } from "./types";
 import {
-  parseGithubCookies,
   buildClaimResult,
   type ClaimOutcome,
   BACKUP_BASE_URL,
-  DEFAULT_GITHUB_CLIENT_ID,
 } from "./agentrouter";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
-/**
- * Ambil state token OAuth dari AgentRouter (HTTP biasa — endpoint ini lolos WAF dari Worker)
- */
-async function fetchOAuthState(baseUrl: string): Promise<string | null> {
-  try {
-    const res = await fetch(`${baseUrl}/api/oauth/state`, {
-      method: "GET",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "application/json, text/plain, */*",
-        Referer: `${baseUrl}/login`,
-        Origin: baseUrl,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-      },
-    });
-    const json = (await res.json().catch(() => null)) as any;
-    if (json && json.success && json.data) return String(json.data);
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Inject cookie GitHub ke browser context dengan toleransi: coba semua sekaligus,
- * jika ditolak coba satu-per-satu dan lewati yang invalid (kembalikan nama-namanya).
- */
-async function addGithubCookies(context: any, githubCookie: string): Promise<string[]> {
-  const cookies = parseGithubCookies(githubCookie);
-  const failed: string[] = [];
-  try {
-    await context.addCookies(cookies);
-  } catch {
-    for (const c of cookies) {
-      try {
-        await context.addCookies([c]);
-      } catch {
-        failed.push(c.name);
-      }
-    }
-  }
-  return failed;
-}
 
 /** Ubah header Cookie ("a=1; b=2") menjadi cookie Playwright untuk baseUrl. */
 function parseCookieHeader(header: string, baseUrl: string): { name: string; value: string; url: string }[] {
@@ -99,21 +51,47 @@ async function readSelfJson(page: any, baseUrl: string, attempts = 2): Promise<a
   return null;
 }
 
-async function looksLikeGithubLogin(page: any): Promise<boolean> {
-  return (await page.locator("#login_field").count().catch(() => 0)) > 0;
-}
+/**
+ * Login via form Email/Username + Password di halaman /login AgentRouter (new-api).
+ * Melempar Error dengan pesan jelas bila kredensial salah.
+ */
+async function loginWithPassword(page: any, baseUrl: string, username: string, password: string): Promise<void> {
+  await page.goto(`${baseUrl}/login`, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-async function looksLikeDeviceVerification(page: any): Promise<boolean> {
-  const url: string = page.url();
-  if (/github\.com\/(login\/device|sessions\/verified-device|login\/two-factor)/.test(url)) return true;
-  const text = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
-  return /verify (your|the) device|device verification/i.test(text);
+  // Halaman login punya 2 mode: default OAuth (GitHub/LinuxDO) & mode email/password.
+  const emailBtn = page.getByRole("button", { name: /sign in with email/i }).first();
+  if (await emailBtn.isVisible().catch(() => false)) {
+    await emailBtn.click();
+  }
+
+  const userInput = page.locator('input[name="username"]');
+  const passInput = page.locator('input[name="password"]');
+  await userInput.waitFor({ timeout: 15000 });
+  await userInput.fill(username);
+  await passInput.fill(password);
+
+  await page.getByRole("button", { name: /^continue$/i }).first().click();
+
+  // Sukses = keluar dari /login (redirect ke console). Salah kredensial = tetap di /login.
+  await page
+    .waitForURL((url: URL) => !url.pathname.startsWith("/login"), { timeout: 30000 })
+    .catch(() => {});
+
+  if (page.url().startsWith(`${baseUrl}/login`)) {
+    const bodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+    const m = bodyText.match(/(wrong|invalid|incorrect)[^\n]{0,80}/i);
+    throw new Error(
+      m
+        ? `Login ditolak AgentRouter: "${m[0].trim()}". Periksa AGENTROUTER_EMAIL & AGENTROUTER_PASSWORD.`
+        : "Login tetap di halaman /login — kredensial kemungkinan salah atau muncul captcha."
+    );
+  }
 }
 
 /**
  * QUICK CHECK: pakai sesi AgentRouter tersimpan untuk membaca saldo dengan satu
  * halaman browser saja (~15-30 detik). Jika last_login_time sudah hari ini,
- * reward harian sudah aktif dan OAuth penuh tidak perlu dijalankan.
+ * reward harian sudah aktif dan login penuh tidak perlu dijalankan.
  */
 export async function browserCheckSession(
   env: Env,
@@ -147,8 +125,8 @@ export async function browserCheckSession(
 
 /**
  * Klaim $25 harian via Browser Run (browser sungguhan → lolos WAF Aliyun).
- * Alur: (opsional refresh github) → GitHub authorize → callback AgentRouter →
- * baca saldo → VERIFIKASI kenaikan quota → simpan sesi baru untuk besok.
+ * Alur: login form Email/Password di /login → baca saldo → VERIFIKASI kenaikan
+ * quota → simpan sesi baru untuk besok.
  */
 export async function browserClaim(
   env: Env,
@@ -159,9 +137,10 @@ export async function browserClaim(
     session: null,
   });
 
-  const githubCookie = env.GITHUB_COOKIE?.trim();
-  if (!githubCookie) {
-    return fail("Browser claim: GITHUB_COOKIE belum dikonfigurasi.", 400);
+  const username = env.AGENTROUTER_EMAIL?.trim();
+  const password = env.AGENTROUTER_PASSWORD;
+  if (!username || !password) {
+    return fail("Browser claim: AGENTROUTER_EMAIL / AGENTROUTER_PASSWORD belum dikonfigurasi.", 400);
   }
   if (!env.BROWSER) {
     return fail("Browser claim: binding BROWSER belum dikonfigurasi di wrangler.toml.", 400);
@@ -176,80 +155,27 @@ export async function browserClaim(
 
   for (const baseUrl of candidateUrls) {
     try {
-      // 1. State token (HTTP biasa)
-      const state = await fetchOAuthState(baseUrl);
-      if (!state) {
-        lastError = `Gagal mengambil state token dari ${baseUrl}.`;
-        continue;
-      }
-
-      // 2. Launch browser + inject sesi GitHub
       const browser = await launch(env.BROWSER);
       try {
         const context = await browser.newContext({ userAgent: USER_AGENT });
-        const failedCookies = await addGithubCookies(context, githubCookie);
-        if (failedCookies.length) console.log("[BROWSER] cookie ditolak & dilewati:", failedCookies.join(", "));
         const page = await context.newPage();
 
-        // Refresh _gh_sess: kunjungi github.com dulu agar GitHub membuat session cookie baru
-        // dari user_session (persistent ~2 minggu). Menghilangkan ketergantungan pada _gh_sess
-        // yang cepat expired (session cookie).
-        await page.goto("https://github.com/", { waitUntil: "domcontentloaded", timeout: 45000 });
-        await page.waitForTimeout(2000).catch(() => {});
-        if (await looksLikeGithubLogin(page)) {
-          return fail(
-            "GITHUB_COOKIE tidak valid — GitHub menampilkan halaman login. Salin ulang SEMUA cookie github.com (Network Tab) lalu perbarui secret GITHUB_COOKIE.",
-            401
-          );
-        }
+        // 1. Login via form email/password (WAF lolos karena browser sungguhan)
+        await loginWithPassword(page, baseUrl, username, password);
+        console.log("[BROWSER] login url:", page.url());
 
-        // 3. Navigasi ke GitHub authorize (browser mengikuti redirect OAuth)
-        const authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
-          DEFAULT_GITHUB_CLIENT_ID
-        )}&state=${encodeURIComponent(state)}&scope=user:email`;
-        await page.goto(authUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-        console.log("[BROWSER] github url:", page.url());
-
-        // Fail-fast: sesi GitHub mati / diminta login ulang / verifikasi perangkat
-        if (/github\.com\/(login|session)/.test(page.url()) || (await looksLikeGithubLogin(page))) {
-          return fail(
-            "GITHUB_COOKIE tidak valid/expired (dialihkan ke halaman login GitHub). Salin ulang cookie lalu perbarui secret.",
-            401
-          );
-        }
-        if (await looksLikeDeviceVerification(page)) {
-          return fail(
-            "GitHub meminta VERIFIKASI PERANGKAT (device verification) — sesi dianggap mencurigakan. Login github.com di browser biasa, selesaikan verifikasi, lalu salin ulang cookie.",
-            401
-          );
-        }
-
-        // 4. Jika GitHub menampilkan consent screen (belum pernah authorize), klik tombol Authorize
-        if (page.url().startsWith("https://github.com")) {
-          const authorizeBtn = page.getByRole("button", { name: /authorize/i }).first();
-          const hasBtn = await authorizeBtn.isVisible().catch(() => false);
-          console.log("[BROWSER] authorize button visible:", hasBtn);
-          if (hasBtn) {
-            await authorizeBtn.click();
-          }
-        }
-
-        // 5. Tunggu redirect balik ke AgentRouter (callback OAuth selesai)
-        await page.waitForURL(/(agentrouter\.org|air-outer\.com)/, { timeout: 45000 });
-        console.log("[BROWSER] callback url:", page.url());
-
-        // 6. Baca saldo via browser (WAF lolos karena JS challenge dijalankan)
+        // 2. Baca saldo via browser (WAF lolos karena JS challenge dijalankan)
         const selfJson = await readSelfJson(page, baseUrl);
         if (!(selfJson && selfJson.success && selfJson.data)) {
           lastError = `Self API ${baseUrl} gagal: ${selfJson?.message || "respons tidak valid"}.`;
           continue;
         }
 
-        // 7. Tangkap sesi AgentRouter hasil login untuk dipakai besok (quick check)
+        // 3. Tangkap sesi AgentRouter hasil login untuk dipakai besok (quick check)
         const cookies = await context.cookies(new URL(baseUrl).origin).catch(() => []);
         const sessionCookie = cookies.find((c: any) => c.name === "session");
 
-        // 8. Susun hasil + verifikasi kenaikan saldo terhadap baseline
+        // 4. Susun hasil + verifikasi kenaikan saldo terhadap baseline
         return buildClaimResult({
           user: selfJson.data,
           quotaBefore: opts.quotaBefore,
@@ -269,6 +195,10 @@ export async function browserClaim(
           429
         );
       }
+      // Salah kredensial tidak perlu dicoba di base URL lain — gagal cepat.
+      if (/login ditolak|kredensial/i.test(msg)) {
+        return fail(msg, 401);
+      }
       lastError = msg;
     }
   }
@@ -281,57 +211,37 @@ export async function browserClaim(
  */
 export async function diagnoseBrowser(env: Env): Promise<Record<string, unknown>> {
   const report: Record<string, unknown> = {
-    hasGithubCookie: Boolean(env.GITHUB_COOKIE?.trim()),
+    hasEmail: Boolean(env.AGENTROUTER_EMAIL?.trim()),
+    hasPassword: Boolean(env.AGENTROUTER_PASSWORD),
     hasBrowserBinding: Boolean(env.BROWSER),
   };
 
-  if (!env.GITHUB_COOKIE?.trim() || !env.BROWSER) return report;
+  const username = env.AGENTROUTER_EMAIL?.trim();
+  const password = env.AGENTROUTER_PASSWORD;
+  if (!username || !password || !env.BROWSER) return report;
 
   const baseUrl = (env.AGENTROUTER_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
-  const state = await fetchOAuthState(baseUrl);
-  report.state = state;
-  if (!state) return report;
-
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({ userAgent: USER_AGENT });
-    const invalidCookies = await addGithubCookies(context, env.GITHUB_COOKIE);
-    report.invalidCookies = invalidCookies;
     const page = await context.newPage();
 
-    // Refresh _gh_sess: kunjungi github.com dulu agar GitHub membuat session cookie baru
-    await page.goto("https://github.com/", { waitUntil: "domcontentloaded", timeout: 45000 });
-    report.githubHomeUrl = page.url();
-    report.loggedInAfterGithubVisit = !(await looksLikeGithubLogin(page));
-    await page.waitForTimeout(2000).catch(() => {});
+    await page.goto(`${baseUrl}/login`, { waitUntil: "domcontentloaded", timeout: 45000 });
+    report.loginUrl = page.url();
 
-    const authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
-      DEFAULT_GITHUB_CLIENT_ID
-    )}&state=${encodeURIComponent(state)}&scope=user:email`;
+    const emailBtn = page.getByRole("button", { name: /sign in with email/i }).first();
+    report.hasEmailModeBtn = await emailBtn.isVisible().catch(() => false);
+    if (report.hasEmailModeBtn) await emailBtn.click();
+
+    const userInput = page.locator('input[name="username"]');
+    report.hasUsernameField = await userInput.isVisible().catch(() => false);
+    report.hasPasswordField = await page.locator('input[name="password"]').isVisible().catch(() => false);
+
     const t0 = Date.now();
-    await page.goto(authUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    report.githubUrl = page.url();
-    report.githubElapsedMs = Date.now() - t0;
-    report.githubCookies = (await context.cookies("https://github.com")).map((c) => c.name);
-    report.hasLoginField = await looksLikeGithubLogin(page);
-    report.hasDeviceVerification = await looksLikeDeviceVerification(page);
-    const authBtn = page.getByRole("button", { name: /authorize/i }).first();
-    report.hasAuthorizeBtn = await authBtn.isVisible().catch(() => false);
-
-    if (report.hasAuthorizeBtn) {
-      await authBtn.click();
-      // Tunggu navigasi/redirect sebentar, lalu tangkap kondisi halaman
-      await page.waitForTimeout(5000).catch(() => {});
-      report.afterClickUrl = page.url();
-      report.afterClickTitle = await page.title().catch(() => "");
-      report.afterClickText = (await page.locator("body").innerText().catch(() => "")).slice(0, 600);
-    }
-
-    try {
-      await page.waitForURL(/(agentrouter\.org|air-outer\.com)/, { timeout: 30000 });
-    } catch (e) {
-      report.waitForUrlError = e instanceof Error ? e.message : String(e);
-    }
+    await loginWithPassword(page, baseUrl, username, password).catch((e) => {
+      report.loginError = e instanceof Error ? e.message : String(e);
+    });
+    report.loginElapsedMs = Date.now() - t0;
     report.finalUrl = page.url();
 
     const selfJson = await readSelfJson(page, baseUrl);

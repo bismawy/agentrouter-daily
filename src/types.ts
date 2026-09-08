@@ -1,6 +1,8 @@
 export interface Env {
   AGENTROUTER_COOKIE?: string;
-  GITHUB_COOKIE?: string;
+  /** Kredensial login Email/Username + Password AgentRouter (Cloudflare Secret). */
+  AGENTROUTER_EMAIL?: string;
+  AGENTROUTER_PASSWORD?: string;
   AGENTROUTER_USER_ID?: string;
   NEW_API_USER?: string;
   TELEGRAM_BOT_TOKEN?: string;
