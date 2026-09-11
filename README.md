@@ -2,11 +2,12 @@
 
 # AgentRouter Daily
 
-Auto-claim reward **$25 harian** [agentrouter.org](https://agentrouter.org) via **Cloudflare Workers** — cron trigger + Browser Rendering untuk menembus WAF, dengan dashboard web untuk memantau saldo & riwayat klaim.
+Auto-claim reward **$25 harian** [agentrouter.org](https://agentrouter.org/register?aff=CKdn) via **Cloudflare Workers** — cron trigger + Browser Rendering untuk menembus WAF, dengan dashboard web untuk memantau saldo & riwayat klaim.
 
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![Browser Rendering](https://img.shields.io/badge/Browser-Rendering-F38020?logo=cloudflare&logoColor=white)
 ![Cron](https://img.shields.io/badge/Cron-08%3A00%20WIB%20%2B%20retry-00C853)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 <img src="design/dashboard.png" alt="Dashboard AgentRouter Daily" width="100%">
 
